@@ -1,0 +1,101 @@
+NAME
+    backup-reporter - handles several types of backup jobs, and produces a
+    uniform report for each job.
+
+SCRIPT CATEGORIES
+    UNIX/System_administration
+
+SYNOPSIS
+    `backup-reporter [ -delms ] [-t device] [-r recipients] config_file
+    [...]'
+
+    `backup-reporter -lms apollo.conf'
+
+    `backup-reporter -ms hermes.conf'
+
+    `backup-reporter -d apollo.conf'
+
+    Note: you must use a config file to specifiy what stuff you want to back
+    up.
+
+README
+    This is a general script for many types of backup jobs. You can use it
+    to configure different types of backups, which can run together or
+    independently of each other. It also formats a nice report for each
+    backup job.
+
+    Complete documentation is available in the script itself, in the
+    embedded POD.
+
+DESCRIPTION
+    This is a general script for many types of backup jobs. You can use it
+    to make complete system backups, backup a few directory trees, or just
+    backup a few files. You can also do all of these jobs at once. A backup
+    job can target just one host, or several hosts at once. You can use it
+    with ufsdump, dump, tar or pax, whichever works best for your system.
+    You can save your archives to tape or just save them to the local
+    filesystem (the script will organize your archive files by hostname).
+
+    The main motivation for writing this script was to manage a variety of
+    different backup jobs for different systems, with each job having a
+    consistent and informative output format. By using config files, I could
+    easily modify the targets of the backup jobs without having to modify
+    the script itself, and conversely, I could easily modify the script
+    itself and have it immediately apply to all backup jobs.
+
+    You specify a backup job by using a config file. The config file syntax
+    is a little clumsy, however, sample config files have been placed into
+    the archive for this script on CPAN, so you can probably just modify
+    them to suit your purposes. This archive is kept in the author's
+    directory on CPAN, namely CPAN/authors/id/JNOLAN.
+
+    To see what a config file will do, run the script against it using the
+    debugging option -d, and you will see a list of the commands which would
+    be run (they won't be run, just listed).
+
+            C<backup-reporter -dl  hermes.conf>
+            C<backup-reporter -d  hermes.conf>
+
+    What this script actually does is construct shell commands on the fly,
+    based on whatever data you have in your config file and configured
+    directly in this script. These shell commands will be calls to ssh, scp,
+    tar, ufsdump, gzip, etc. (You will need to edit this script in order to
+    configure paths to these binaries).
+
+    If you use the -m option, then the script takes the text of each command
+    it generated along with its output, formats it nicely into a mail
+    message, and mails it to you at the end of each backup job. It sends
+    special mail messages based on the exit status of the commands it
+    launches.
+
+    This script expects to be able to ssh and scp to remote hosts as some
+    user which has enough priveleges to read the target files. You will need
+    to set this up on your own. The example config files are set up to open
+    ssh connections as the user root on the remote hosts.
+
+    Instructions for downloading, installing and setting up ssh are availabe
+    at http://www.ssh.fi (http://www.ssh.fi/sshprotocols2/index.html) or
+    http://www.datafellows.com/f-secure.
+
+    If you like this script and end up using it, please let me know. If you
+    run into problems or errors, I will try to give you a hand with it
+    and/or post bugfixes and improvements back out onto CPAN. Please email
+    me at jpnolan@sonic.net.
+
+PREREQUISITES
+    This script requires `MIME::Entity', which requires the `MailTools'
+    bundle, which itself requires `MIME::Base64'. (If I remember
+    correctly... they're all nifty modules, just install all of them.)
+
+COPYRIGHT
+    Copyright (c) 1998,1999 John Nolan <jpnolan@sonic.net>. All rights
+    reserved. This program is free software. You may modify and/or
+    distribute it under the same terms as Perl itself. This copyright notice
+    must remain attached to the file.
+
+WARRANTY
+    This script comes with absolutely no warranty.
+
+REVISION
+    $Id: backup-reporter,v 1.9 1999/12/24 06:21:16 john Exp john $
+

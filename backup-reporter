@@ -1,0 +1,781 @@
+#!/usr/local/bin/perl -w
+#------------------------------------------------------------------------
+#
+# NAME
+#	backup-reporter - handles many types of backup jobs,
+#	and produces a uniform report for each job. 
+#
+# SYNOPSIS
+#	backup-reporter -lms apollo.conf
+#	backup-reporter -ms  hermes.conf
+#
+#	Note:  you *must* use a config file to specifiy
+#	what stuff you want to back up.  Example config files
+#	are available in the archive of this script, available 
+#	on CPAN under CPAN/authors/id/JNOLAN. 
+#
+# OPTIONS
+#	-d  Debug:     Don't actually do anything, just print 
+#	               the commands that would run. 
+#	-e  NoEject:   Do not eject the tape after finishing. 
+#	-l  Local:     Write backup to the local hard drive. 
+#	-m  Mail msg:  Send out a mail message detailing results. 
+#	-s  Silent:    Suppress standard output. 
+#
+#	-r  recipient:	Specify the mail recipient (override default)
+#	-t  tape:      Specify the tape device (override default)
+#
+# NOTES
+#	This script expects to be able to ssh and scp to remote hosts 
+#	as some user which has enough priveleges to read the target files.  
+#	Setting up a user account for ssh is an exercise left to the reader.  ;)
+#
+# $Id: backup-reporter,v 1.10 1999/12/24 06:33:02 john Exp john $
+#------------------------------------------------------------------------
+
+=head1 NAME
+
+backup-reporter -  handles several types of backup jobs,
+and produces a uniform report for each job. 
+
+=head1 SCRIPT CATEGORIES
+
+UNIX/System_administration
+
+=head1 SYNOPSIS
+
+C<backup-reporter [ -delms ] [-t device] [-r recipients] config_file [...]>
+
+C<backup-reporter -lms apollo.conf>
+
+C<backup-reporter -ms  hermes.conf>
+
+C<backup-reporter -d   apollo.conf>
+
+Note:  you must use a config file to specifiy what stuff you want to back up. 
+
+=head1 README
+
+This is a general script for many types of backup jobs.  You can use it 
+to configure different types of backups, which can run together
+or independently of each other.  It also formats a nice report 
+for each backup job.  
+
+=head1 DESCRIPTION
+
+This is a general script for many types of backup jobs.  You can use it 
+to make complete system backups, backup a few directory trees, or 
+just backup a few files.  You can also do all of these jobs at once.
+A backup job can target just one host, or several hosts at once.  
+You can use it with ufsdump, dump, tar or pax, whichever works best 
+for your system.  You can save your archives to tape or just save them 
+to the local filesystem (the script will organize your archive files 
+by hostname).  
+
+The main motivation for writing this script was to manage
+a variety of different backup jobs for different systems, 
+with each job having a consistent and informative output format.
+By using config files, I could easily modify the targets of 
+the backup jobs without having to modify the script itself, 
+and conversely, I could easily modify the script itself 
+and have it immediately apply to all backup jobs. 
+
+You specify a backup job by using a config file. The config file
+syntax is a little clumsy, however, sample config files have
+been placed into the archive for this script on CPAN, so you can
+probably just modify them to suit your purposes.  This archive is kept
+in the author's directory on CPAN, namely CPAN/authors/id/JNOLAN. 
+
+To see what a config file will do, run the script against it
+using the debugging option -d, and you will see a list of the commands 
+which would be run (they won't be run, just listed).
+
+	C<backup-reporter -dl  hermes.conf>
+	C<backup-reporter -d  hermes.conf>
+
+What this script actually does is construct shell commands on the fly,
+based on whatever data you have in your config file and configured
+directly in this script.  These shell commands will be calls to ssh, scp, 
+tar, ufsdump, gzip, etc.  (You will need to edit this script in order 
+to configure paths to these binaries). 
+
+If you use the -m option, then the script takes the text of each command 
+it generated along with its output, formats it nicely into a mail message, 
+and mails it to you at the end of each backup job.  It sends special mail 
+messages based on the exit status of the commands it launches.  
+
+This script expects to be able to ssh and scp to remote hosts 
+as some user which has enough priveleges to read the target files.  
+You will need to set this up on your own.  The example config files 
+are set up to open ssh connections as the user root on the remote hosts.   
+
+Instructions for downloading, installing and setting up ssh 
+are availabe at http://www.ssh.fi (http://www.ssh.fi/sshprotocols2/index.html) 
+or http://www.datafellows.com/f-secure. 
+
+If you like this script and end up using it, please let me know. 
+If you run into problems or errors, I will try to give you
+a hand with it and/or post bugfixes and improvements back out onto CPAN.  
+Please email me at jpnolan@sonic.net.  
+
+
+=head1 PREREQUISITES
+
+This script requires C<MIME::Entity>, which requires the C<MailTools> bundle, 
+which itself requires C<MIME::Base64>.  (If I remember correctly...  
+they're all nifty modules, just install all of them.)  
+
+=head1 COPYRIGHT
+
+Copyright (c) 1998,1999 John Nolan <jpnolan@sonic.net>. All rights reserved.
+This program is free software.  You may modify and/or distribute it
+under the same terms as Perl itself.  This copyright notice
+must remain attached to the file.
+
+=head1 WARRANTY
+
+This script comes with absolutely no warranty.  
+
+=head1 REVISION
+
+$Id: backup-reporter,v 1.10 1999/12/24 06:33:02 john Exp john $
+
+=cut
+
+#------------------------------------------------------------------------
+
+require 5;
+
+use MIME::Entity;
+use Getopt::Std;
+use File::Basename;
+use Sys::Hostname;
+
+use strict;
+
+$|++; # Turn on autoflush
+
+
+#------------------------------------------------------------------------
+# EDIT THIS
+# Local configuration commands -- edit this if you move
+# this script onto another machine, or make other changes.
+#
+my $mail_recipients = 'root@localhost';
+
+my $machine     = hostname();
+my $sendmail    = "/usr/lib/sendmail";
+my $ssh         = "/usr/local/bin/ssh";
+my $scp         = "/usr/local/bin/scp";
+my $dd          = "/bin/dd";
+my $mt          = "/usr/bin/mt";
+
+my $blocksize   = 65536;  # This is passed to the dd command. 
+
+my $temp_area   = "/export/home/backups/local";
+
+# No rewinds! (Unless we want them explicitly)
+#
+my $device	= "/dev/nrst0";  
+
+
+#------------------------------------------------------------------------
+# Stuff which needs global scope
+# (Most of this is used in error messages).
+#
+
+# Get the name of the user who is running this script.
+#
+my ($effective_user) = getpwuid($>);
+
+# Remember our original command string
+#
+my $original_command_string = join ' ', $0,@ARGV;
+
+# This will hold the output of all external commands
+#
+my $output = "";
+
+# To keep track of where we are
+#
+my $begintime   = "";
+my $endtime     = "";
+my $configfile  = "";
+
+# To keep track of what machines we're backing up
+#
+my %hosts = ();
+my $hoststring = "";
+
+
+#------------------------------------------------------------------------
+# Get command-line options
+#
+getopts('delmr:st:');
+
+use vars qw( $opt_d $opt_e $opt_l $opt_m $opt_r $opt_s $opt_t );
+
+my $debug      = ($opt_d ? 1 : 0);
+my $noeject    = ($opt_e ? 1 : 0);
+my $local      = ($opt_l ? 1 : 0);
+my $mail_msg   = ($opt_m ? 1 : 0);
+my $silent     = ($opt_s ? 1 : 0);
+
+$device           = ($opt_t ? $opt_t : $device          );
+$mail_recipients  = ($opt_r ? $opt_r : $mail_recipients );
+
+
+#------------------------------------------------------------------------
+# Functions (Main Logic section is at the bottom)
+#------------------------------------------------------------------------
+
+
+#------------------------------------------------------------------------
+# Usage blurb.  
+#
+sub usage {
+
+	print "Usage: $0 [ -delms ] [-t device] [-r recipients] config_file \n";
+	exit(-1);
+}
+
+
+#------------------------------------------------------------------------
+# Tiny wrapper for the mkdir command.  
+# Prevents this program from croaking 
+# if the directory already exists. 
+#
+sub makedir {
+
+	my $directory = (shift or "");
+	return if -d $directory;
+
+	print_wrapper ("========================================\n");
+
+	if ($debug) {
+
+		print_wrapper ("Would create directory $directory\n");
+
+	} else {
+	
+		print_wrapper ("Creating directory $directory\n");
+		mkdir $directory, 0755 
+			or die "Problem creating directory $directory: $!\n";
+	}
+}
+
+#------------------------------------------------------------------------
+# This routine opens up the config file and reads in each line. 
+# For each line, it either runs tape_backup() or local_bakup().
+# NOTE:  this routine will always do either local backups or tape backups,
+# but never both alternatively.  
+#
+# The configuration option "local" should be the first item 
+# in the config file.  No funny stuff.  (The purpose of this feature
+# is to prevent config files which are really meant only
+# to be local from being run onto a tape by accident.) 
+# 
+sub do_backup {
+
+	my $configfile = shift;
+
+	open (CONFIGFILE, "<$configfile") 
+		or die "Problem opening file $configfile for reading: $!\n";
+
+	while (<CONFIGFILE>) {
+
+		next if /^\s*#/; # Skip comments
+		next if /^\s*$/; # Skip blank lines
+
+		if (/^local$/) {  
+			$local = 1;
+			next;
+		}
+
+		tape_backup($_)  unless $local;
+		local_backup($_) if     $local;
+	}
+
+	close (CONFIGFILE);
+}
+
+#------------------------------------------------------------------------
+# Parse out each line of the config file.  Return a set of strings
+# which are useful for constructing a command line. 
+#
+sub parse_config_line {
+
+	my (
+		$remote_host,
+		$remote_user, 
+		$nice_cmd, 
+		$remote_tar,
+		$remote_gzip,
+		$remote_path
+
+	) = split /:/, shift;
+
+	my ($remote_path_noslashes, $remote_path_parent, $remote_target);
+
+	unless ($remote_path eq '/') {
+
+		# Remove any trailing slashes
+		($remote_path_noslashes = $remote_path) =~ s/\/$//; 
+
+        	# From "/usr/local/bin" isolate "/usr/local"
+        	($remote_path_parent  = $remote_path_noslashes ) =~ s#/[^/]+$#/#;
+	
+        	# From "/usr/local/bin" isolate "bin"
+        	($remote_target    = $remote_path_noslashes ) =~ s#.*/([^/]+)$#$1#;
+
+	} else {
+
+		$remote_path_parent = '/';
+		$remote_target = '/';
+		$remote_path_noslashes = '/rootdirectory';
+	}
+
+	return (
+		$remote_host, 
+		$remote_user, 
+		$nice_cmd, 
+		$remote_tar, 
+		$remote_gzip, 
+		$remote_path,
+		$remote_path_parent,
+		$remote_target,
+		$remote_path_noslashes
+	)
+}
+
+#------------------------------------------------------------------------
+# Construct an "scp" command, or an "ssh" comand with a pipe to
+# a local file.  
+# This is executed once for each line in the config file
+# (if it's a local backup).
+#
+sub local_backup {
+
+	my (
+		$remote_host, 
+		$remote_user, 
+		$nice_cmd, 
+		$remote_tar, 
+		$remote_gzip, 
+		$remote_path,
+		$remote_path_parent,
+		$remote_target,
+		$remote_path_noslashes
+
+	)  = parse_config_line (shift);
+
+	my $cmd = "";
+	my $dir  = "";
+	my $path = "";
+
+	# Construct a path to the file in the local backup directory
+	# Make a whole directory tree if necessary: 
+	# /export/home/backup/apollo/etc, /export/home/backup/apollo/usr, etc.
+	#
+	makedir ("$temp_area/$remote_host");
+	foreach $dir (split /\//,dirname($remote_path)) {
+		next unless $dir;
+		$path = join '/', $path, $dir;
+		makedir ("$temp_area/$remote_host$path");
+	}
+
+	# Either we are creating a tar/dump archive, or (if $remote_tar
+	# is empty) we are just copying an individual file.
+	# $remote_tar might contain "/usr/bin/tar" or something like
+	# "/usr/sbin/ufsdump" -- whatever was in the config file. 
+	#
+	if ($remote_tar) {
+
+		my $suffix;
+		$suffix = "tar"   if $remote_tar =~ m/(tar|pax)/ ;
+		$suffix = "dump"  if $remote_tar =~ m/dump/ ;
+
+		# Build ssh command string
+		#
+		$cmd = "$ssh ";
+		$cmd .= "-l $remote_user " if $remote_user;
+		$cmd .= "$remote_host ";
+		$cmd .= "\" ";
+
+		# If we're tarring, chdir to the directory which is the parent of the
+		# target directory (e.g., for /etc:  "cd / ; tar -cvf - etc")
+		# If we're dumping, then don't bother to cd, it doesn't matter.
+		#
+		$cmd .= "cd $remote_path_parent ; " if $remote_tar =~ m/(tar|pax)/ ;
+
+		$cmd .= "$nice_cmd $remote_tar ";
+
+		# If we're tarring locally, then tar the target directory.
+		# ("tar -cvf - etc ")
+		# If we're dumping locally, then dump the actual device name. 
+		# ("ufsdump 0uvf - /dev/dsk/xxxxx ")
+		#
+		$cmd .= "$remote_target " if $remote_tar =~ m/(tar|pax)/ ;
+		$cmd .= "$remote_path "   if $remote_tar =~ m/dump/ ;
+
+		$cmd .= "| $nice_cmd $remote_gzip  " if $remote_gzip;
+		$suffix .= ".gz"  if $remote_gzip;
+
+		$cmd .= "\" > $temp_area/$remote_host${remote_path_noslashes}.$suffix";
+
+	} else {
+
+		# Construct the scp command string
+		#
+		$cmd = "$scp ";
+		$cmd .= "$remote_user\@" if $remote_user;
+		$cmd .= "$remote_host:$remote_path ";
+		$cmd .= "$temp_area/$remote_host$remote_path";
+	}
+	
+	# OK, run the system call.
+	#
+	do_command ($cmd);
+
+	# Remember which hosts we were backing up
+	# and save the list as a nice string. 
+	$hoststring .= "$remote_host " unless ($hosts{$remote_host});
+	$hosts{$remote_host} = 1;
+
+}
+
+
+#------------------------------------------------------------------------
+# Construct an "ssh" command with a pipe to the tape drive.
+# This is executed once for each line in the config file
+#
+sub tape_backup {
+
+	my (
+		$remote_host, 
+		$remote_user, 
+		$nice_cmd, 
+		$remote_tar, 
+		$remote_gzip, 
+		$remote_path,
+		$remote_path_parent,
+		$remote_target,
+		$remote_path_noslashes
+
+	)  = parse_config_line (shift);
+
+	my $cmd = "";
+
+	# Build the ssh command string
+
+	$cmd = "$ssh ";
+	$cmd .= "-l $remote_user " if $remote_user;
+	$cmd .= "$remote_host ";
+	$cmd .= "\" ";
+
+	# If we're tarring, chdir to the target directory 
+	# (e.g., for /etc:  "cd /etc ; tar -cvf - .")
+	# If we're dumping, then don't bother to cd, it doesn't matter.
+	#
+	$cmd .= "cd $remote_path ; " if $remote_tar =~ m/(tar|pax)/ ;
+
+	$cmd .= "$nice_cmd $remote_tar ";
+
+	# If we're tarring to tape, then tar the current directory.
+	# ("tar -cvf - . ")
+	# If we're dumping, then dump the actual device name. 
+	# ("ufsdump 0uvf - /dev/dsk/xxxxx ")
+	#
+	$cmd .= ". "              if $remote_tar =~ m/(tar|pax)/ ;
+	$cmd .= "$remote_path "   if $remote_tar =~ m/dump/ ;
+
+	$cmd .= "| $nice_cmd $remote_gzip  " if $remote_gzip;
+	$cmd .= "\" | $dd of=$device bs=65536";
+
+	# OK, run the system call.
+	#
+	do_command($cmd);
+
+	# Remember which hosts we were backing up
+	# and save the list as a nice string.
+	#
+	$hoststring .= "$remote_host " unless ($hosts{$remote_host});
+	$hosts{$remote_host} = 1;
+}
+
+
+#------------------------------------------------------------------------
+# Generic meta-wrapper for executing system calls that access 
+# a tape drive. This always calls do_command() to carry out the call.
+#
+sub tape_command {
+
+	my $cmd = shift;
+	return unless $cmd;
+
+	# Skip out of this routine if we're not using 
+	# the tape drive.  (Duh!)
+	return 1 if $local;
+
+	my $rc = do_command("$mt -f $device $cmd");
+
+	exit(-1) unless $rc == 0;
+
+	return $rc;
+}
+
+#------------------------------------------------------------------------
+# Generic wrapper for executing system calls and 
+# handling exceptions. 
+#
+sub do_command () {
+
+	my $cmd = shift;
+	return 0 unless $cmd; # Abort unless there's a command string. 
+
+	print_wrapper ("========================================\n");
+	print_wrapper ("Running command:  \n$cmd\n")   unless $debug;
+	print_wrapper ("Would run command:  \n$cmd\n") if     $debug;
+
+	my $rc = 0;
+
+	unless ($debug) {
+
+		my $this_output = `( $cmd ) 2>&1`;
+
+		$rc = ($? >> 8);
+
+		print_wrapper ($this_output);
+
+		# Report any errors, but don't die, just keep going.
+		#
+		unless ($rc == 0) {
+
+			print_wrapper("Problem running command (Returned $rc): \n$cmd\n$!\n");
+
+			$endtime = scalar localtime;
+
+			# This flag determines the exact text of the mail message, if any. 
+			my $message = "problem";
+
+			# Special message for simple tape commands
+			#
+			$message = "attention" if ($cmd =~ m/$mt -f $device/o);
+
+			mail_warning($mail_recipients, $message, $configfile, 
+					$begintime, $endtime) if $mail_msg;
+
+		}
+	}
+
+	return $rc;
+}
+
+
+#------------------------------------------------------------------------
+# Handle all output. 
+#
+sub print_wrapper {
+
+	my @printlines = (@_, "");
+
+	print @printlines unless $silent;
+
+	map { $output .= $_; } @printlines;
+}
+
+#------------------------------------------------------------------------
+# Pretty-print mail warnings
+#
+sub mail_warning {
+
+	my ($recipients,$subject,$configfile,$begintime,$endtime) 
+		= (@_,"","","","","","");
+	my $body;
+
+	die "Must have email address in order to send message!\n" 
+		unless $recipients;
+
+	#-------------------------------------------------------
+	if ($subject eq "attention") {
+
+		# When this message goes out, the backup has been 
+		# brought to a halt, because the tape drive
+		# is not available for some reason. 
+		#
+		$subject = "TAPE DRIVE on $machine needs attention";
+		($body = <<"		EOM") =~ s/^\t+([^\t]+)/$1/gm;
+
+		The backup job was aborted because the tape drive is not ready. 
+
+		Please insert a blank tape into ${machine}'s $device drive and, 
+		as user "$effective_user", run the command "$original_command_string".
+
+		EOM
+
+	#-------------------------------------------------------
+	} elsif ($subject eq "switch") {
+
+		# When this message goes out, the backup
+		# job to tape is completely finished. 
+		#
+		$subject = "PLEASE REMOVE TAPE on $machine: $configfile";
+		my $date = datestring();
+
+		# Eliminate the path and extension 
+		# from the name of the config file.
+		#
+		$configfile = basename($configfile);
+
+		($body = <<"		EOM") =~ s/^\t+([^\t]+)/$1/gm;
+
+		Backup began at: $begintime
+		Backup ended at: $endtime
+
+		Please remove the tape from ${machine}'s $device drive.
+		If the tape has no label, then please label it as follows: 
+
+  		   Backup set: $configfile
+  		   $hoststring
+  		   $date
+		EOM
+
+	#-------------------------------------------------------
+	} elsif ($subject eq "local") {
+
+		# When this message goes out, the backup
+		# job to the local hard drive is completely finished. 
+		#
+		my $date = datestring();
+		$subject = "Backup finished on $machine $date: $hoststring ";
+		($body = <<"		EOM") =~ s/^\t+([^\t]+)/$1/gm;
+
+		Backup began at: $begintime
+		Backup ended at: $endtime
+
+		Backup set: $configfile
+		$hoststring
+		$date
+
+		EOM
+
+	#-------------------------------------------------------
+	} elsif ($subject eq "problem") {
+
+		# In general, when this message goes out, the backup
+		# is still running, but there is some problem. 
+		# Often the "tar" command has a non-zero exit value
+		# even when things are still pretty much OK.  
+		#
+		my $date = datestring();
+		$subject = "PROBLEM(?) backup on $machine $date: $hoststring ";
+		($body = <<"		EOM") =~ s/^\t+([^\t]+)/$1/gm;
+
+		Backup began at:   $begintime
+		This message sent: $endtime
+
+		Backup set: $configfile
+		$hoststring
+		$date
+
+		EOM
+	}
+
+	$subject .= "  " . timestring();
+
+	#----------------------------
+	# Create mail object
+	#
+	my $mimedoc = build MIME::Entity
+		Type     => "multipart/mixed",
+		-From    => "Backup Process on $machine <$machine\@n2k.com>",
+		-To      => "$recipients",
+		-Subject => "$subject";
+
+	#----------------------------
+	# Create mail body and attach it to the message
+	#
+	my $separator = "\n####################################################\n";
+	#
+	$body = $separator . $body . $separator;
+	$body .= $output . $separator;
+	#
+	attach $mimedoc  Data=>$body;
+
+	#----------------------------
+	# OK! send the mail message off
+	#
+	open MAIL, "| $sendmail -t -i"
+		or die "Problem piping to sendmail: $!";
+	$mimedoc->print(\*MAIL);
+
+}
+
+
+#------------------------------------------------------------------------
+# Returns a datestamp for the current date:   YYYY-MM-DD
+#
+sub datestring {
+
+	my ($day,$month,$year) = (localtime)[3,4,5];
+
+	return sprintf("%04d-%02d-%02d", $year+1900,$month+1,$day);
+}
+
+#------------------------------------------------------------------------
+# Returns a timestamp for the current day and time:   XXXday 00:00
+#
+sub timestring {
+
+	my ($min,$hour,$wday) = (localtime)[1,2,6];
+
+	my @days = 
+		qw(Error Monday Tuesday Wednesday Thursday Friday Saturday Sunday);
+
+	return sprintf("%s %02d:%02d", $days[$wday],$hour,$min);
+}
+
+#------------------------------------------------------------------------
+# MAIN LOGIC
+#------------------------------------------------------------------------
+
+# Note that the main logic section does not explicitly handle debugging.
+# This is taken care of on a lower level -- specifically, in the wrapper 
+# for system calls, "do_command()".  The rest of the program does not
+# know that it's just debugging.  ;) 
+
+
+# We want exactly one argument, which is the name of the config file. 
+# (Command-line options and certain other details are processed above.)
+#
+usage() if $#ARGV != 0;
+$configfile = shift;
+
+$begintime = scalar localtime;
+
+# Rewind the tape 
+#
+tape_command("rewind") unless $local;
+
+# OK, rewind was successful, go ahead with a backup. 
+#
+do_backup($configfile);
+
+# Backups were successful, rewind the tape again. 
+#
+tape_command("rewind")  unless $local;
+tape_command("rewoffl") unless $local or $noeject;
+
+
+$endtime = scalar localtime;
+
+# All done! Tell the world!
+#
+
+my $message = ($local ? "local" : "switch");
+
+mail_warning($mail_recipients, $message, $configfile, 
+		$begintime, $endtime) if $mail_msg;
+
+exit(0);
+#------------------------------------------------------------------------
