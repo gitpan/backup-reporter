@@ -1,4 +1,4 @@
-#!/usr/local/bin/perl -w
+#!/usr/bin/perl -w
 #------------------------------------------------------------------------
 #
 # NAME
@@ -12,7 +12,8 @@
 #	Note:  you *must* use a config file to specifiy
 #	what stuff you want to back up.  Example config files
 #	are available in the archive of this script, available 
-#	on CPAN under CPAN/authors/id/JNOLAN. 
+#	on CPAN in this directory:
+#	http://www.perl.com/CPAN-local/modules/by-authors/id/JNOLAN
 #
 # OPTIONS
 #	-d  Debug:     Don't actually do anything, just print 
@@ -21,16 +22,16 @@
 #	-l  Local:     Write backup to the local hard drive. 
 #	-m  Mail msg:  Send out a mail message detailing results. 
 #	-s  Silent:    Suppress standard output. 
+#	-h  Host:      Script will assume all hosts are localhosts.
 #
-#	-r  recipient:	Specify the mail recipient (override default)
+#	-r  recipient: Specify the mail recipient (override default)
 #	-t  tape:      Specify the tape device (override default)
 #
 # NOTES
 #	This script expects to be able to ssh and scp to remote hosts 
-#	as some user which has enough priveleges to read the target files.  
+#	as some user which has enough privileges to read the target files.  
 #	Setting up a user account for ssh is an exercise left to the reader.  ;)
 #
-# $Id: backup-reporter,v 1.10 1999/12/24 06:33:02 john Exp john $
 #------------------------------------------------------------------------
 
 =head1 NAME
@@ -44,13 +45,13 @@ UNIX/System_administration
 
 =head1 SYNOPSIS
 
-C<backup-reporter [ -delms ] [-t device] [-r recipients] config_file [...]>
+C<backup-reporter [ -dehlms ] [-t device] [-r recipients] config_file [...]>
 
 C<backup-reporter -lms apollo.conf>
 
-C<backup-reporter -ms  hermes.conf>
+C<backup-reporter -ms hermes.conf>
 
-C<backup-reporter -d   apollo.conf>
+C<backup-reporter -d apollo.conf>
 
 Note:  you must use a config file to specifiy what stuff you want to back up. 
 
@@ -90,8 +91,8 @@ To see what a config file will do, run the script against it
 using the debugging option -d, and you will see a list of the commands 
 which would be run (they won't be run, just listed).
 
-	C<backup-reporter -dl  hermes.conf>
-	C<backup-reporter -d  hermes.conf>
+	C<backup-reporter -dl hermes.conf>
+	C<backup-reporter -d hermes.conf>
 
 What this script actually does is construct shell commands on the fly,
 based on whatever data you have in your config file and configured
@@ -105,13 +106,31 @@ and mails it to you at the end of each backup job.  It sends special mail
 messages based on the exit status of the commands it launches.  
 
 This script expects to be able to ssh and scp to remote hosts 
-as some user which has enough priveleges to read the target files.  
+as some user which has enough privileges to read the target files.  
 You will need to set this up on your own.  The example config files 
 are set up to open ssh connections as the user root on the remote hosts.   
 
 Instructions for downloading, installing and setting up ssh 
-are availabe at http://www.ssh.fi (http://www.ssh.fi/sshprotocols2/index.html) 
+are available at http://www.ssh.fi (http://www.ssh.fi/sshprotocols2/index.html) 
 or http://www.datafellows.com/f-secure. 
+
+Invoking the -h option will make the script assume that all hosts in the
+configuration file are localhosts.  This means that instead of 
+attempting to connect to a remote host via ssh, the script will ignore
+the hostname that is specified in the config file lines, and instead
+make backup copies of the local directory tree.  If you are going to 
+use the -h option to make backups of the local system, you must configure 
+a config file separately from other backup jobs which connect 
+to other hosts.  The host name that you use in the config file 
+will still be used for cosmetic purposes, such as in the name 
+of the archive file or in mail messages sent in connection with 
+that backup job. 
+
+Although it is possible to use both the -h and the -l option together,
+(and this script enables this kind of operation), nevertheless,
+this is not a good idea.  It defeats the purpose of backups to
+keep backup archives of files on the same system where the original
+files are located.  'Nuff said. 
 
 If you like this script and end up using it, please let me know. 
 If you run into problems or errors, I will try to give you
@@ -125,9 +144,14 @@ This script requires C<MIME::Entity>, which requires the C<MailTools> bundle,
 which itself requires C<MIME::Base64>.  (If I remember correctly...  
 they're all nifty modules, just install all of them.)  
 
+=head1 THANKS
+
+Darrell A. Schulte suggested the -h option and helped 
+write the code which implements it.
+
 =head1 COPYRIGHT
 
-Copyright (c) 1998,1999 John Nolan <jpnolan@sonic.net>. All rights reserved.
+Copyright (c) 1998-2000 John Nolan <jpnolan@sonic.net>. All rights reserved.
 This program is free software.  You may modify and/or distribute it
 under the same terms as Perl itself.  This copyright notice
 must remain attached to the file.
@@ -136,15 +160,9 @@ must remain attached to the file.
 
 This script comes with absolutely no warranty.  
 
-=head1 REVISION
-
-$Id: backup-reporter,v 1.10 1999/12/24 06:33:02 john Exp john $
-
 =cut
 
 #------------------------------------------------------------------------
-
-require 5;
 
 use MIME::Entity;
 use Getopt::Std;
@@ -168,11 +186,12 @@ my $sendmail    = "/usr/lib/sendmail";
 my $ssh         = "/usr/local/bin/ssh";
 my $scp         = "/usr/local/bin/scp";
 my $dd          = "/bin/dd";
+my $cp          = "/bin/cp";
 my $mt          = "/usr/bin/mt";
 
 my $blocksize   = 65536;  # This is passed to the dd command. 
 
-my $temp_area   = "/export/home/backups/local";
+my $temp_area   = "/home/backups";
 
 # No rewinds! (Unless we want them explicitly)
 #
@@ -211,12 +230,13 @@ my $hoststring = "";
 #------------------------------------------------------------------------
 # Get command-line options
 #
-getopts('delmr:st:');
+getopts('delmr:hst:');
 
-use vars qw( $opt_d $opt_e $opt_l $opt_m $opt_r $opt_s $opt_t );
+use vars qw( $opt_d $opt_e $opt_h $opt_l $opt_m $opt_r $opt_s $opt_t );
 
 my $debug      = ($opt_d ? 1 : 0);
 my $noeject    = ($opt_e ? 1 : 0);
+my $localhost  = ($opt_h ? 1 : 0);
 my $local      = ($opt_l ? 1 : 0);
 my $mail_msg   = ($opt_m ? 1 : 0);
 my $silent     = ($opt_s ? 1 : 0);
@@ -235,7 +255,7 @@ $mail_recipients  = ($opt_r ? $opt_r : $mail_recipients );
 #
 sub usage {
 
-	print "Usage: $0 [ -delms ] [-t device] [-r recipients] config_file \n";
+	print "Usage: $0 [ -delmsh ] [-t device] [-r recipients] config_file \n";
 	exit(-1);
 }
 
@@ -369,7 +389,7 @@ sub local_backup {
 
 	)  = parse_config_line (shift);
 
-	my $cmd = "";
+	my $cmd  = "";
 	my $dir  = "";
 	my $path = "";
 
@@ -392,15 +412,9 @@ sub local_backup {
 	if ($remote_tar) {
 
 		my $suffix;
-		$suffix = "tar"   if $remote_tar =~ m/(tar|pax)/ ;
-		$suffix = "dump"  if $remote_tar =~ m/dump/ ;
-
-		# Build ssh command string
-		#
-		$cmd = "$ssh ";
-		$cmd .= "-l $remote_user " if $remote_user;
-		$cmd .= "$remote_host ";
-		$cmd .= "\" ";
+		$suffix =  "tar"  if $remote_tar =~ m/(tar|pax)/ ;
+		$suffix =  "dump" if $remote_tar =~ m/dump/ ;
+		$suffix .= ".gz"  if $remote_gzip;
 
 		# If we're tarring, chdir to the directory which is the parent of the
 		# target directory (e.g., for /etc:  "cd / ; tar -cvf - etc")
@@ -419,18 +433,49 @@ sub local_backup {
 		$cmd .= "$remote_path "   if $remote_tar =~ m/dump/ ;
 
 		$cmd .= "| $nice_cmd $remote_gzip  " if $remote_gzip;
-		$suffix .= ".gz"  if $remote_gzip;
 
-		$cmd .= "\" > $temp_area/$remote_host${remote_path_noslashes}.$suffix";
+		# Now wrap the command in an invocation of ssh 
+		#
+		unless ($localhost) {
+
+			my $oldcmd = $cmd;
+
+			$cmd =  "$ssh ";
+			$cmd .= "-l $remote_user " if $remote_user;
+			$cmd .= "$remote_host \" $oldcmd \"";
+
+		} else {
+
+			# (Intentionally empty)
+			#
+			# If we land here, then we are making a tarball of local files
+			# and saving it to a local filesystem.
+			# You won't ever really rely on this as a backup strategy, 
+			# will you?  I didn't think so.  ;) 
+		}
+
+
+		$cmd .= " > $temp_area/$remote_host${remote_path_noslashes}.$suffix"; 
+
 
 	} else {
 
-		# Construct the scp command string
-		#
-		$cmd = "$scp ";
-		$cmd .= "$remote_user\@" if $remote_user;
-		$cmd .= "$remote_host:$remote_path ";
-		$cmd .= "$temp_area/$remote_host$remote_path";
+		unless ($localhost) {
+
+			# Construct the scp command string
+			#
+			$cmd =  "$scp ";
+			$cmd .= "$remote_user\@" if $remote_user;
+			$cmd .= "$remote_host:$remote_path ";
+			$cmd .= "$temp_area/$remote_host$remote_path";
+
+		} else {
+
+			# You won't ever really rely on this as a backup strategy, 
+			# will you?  I didn't think so.  ;) 
+			#
+			$cmd = "$cp $remote_path $temp_area/$remote_path";
+		}
 	}
 	
 	# OK, run the system call.
@@ -439,6 +484,7 @@ sub local_backup {
 
 	# Remember which hosts we were backing up
 	# and save the list as a nice string. 
+	#
 	$hoststring .= "$remote_host " unless ($hosts{$remote_host});
 	$hosts{$remote_host} = 1;
 
@@ -466,13 +512,6 @@ sub tape_backup {
 
 	my $cmd = "";
 
-	# Build the ssh command string
-
-	$cmd = "$ssh ";
-	$cmd .= "-l $remote_user " if $remote_user;
-	$cmd .= "$remote_host ";
-	$cmd .= "\" ";
-
 	# If we're tarring, chdir to the target directory 
 	# (e.g., for /etc:  "cd /etc ; tar -cvf - .")
 	# If we're dumping, then don't bother to cd, it doesn't matter.
@@ -490,7 +529,19 @@ sub tape_backup {
 	$cmd .= "$remote_path "   if $remote_tar =~ m/dump/ ;
 
 	$cmd .= "| $nice_cmd $remote_gzip  " if $remote_gzip;
-	$cmd .= "\" | $dd of=$device bs=65536";
+
+	# Now wrap the command in an invocation of ssh 
+	#
+	unless ($localhost) {
+
+		my $oldcmd = $cmd;
+
+		$cmd =  "$ssh ";
+		$cmd .= "-l $remote_user " if $remote_user;
+		$cmd .= "$remote_host \" $oldcmd \"";
+	}
+
+	$cmd .= " | $dd of=$device bs=65536";
 
 	# OK, run the system call.
 	#
@@ -688,7 +739,7 @@ sub mail_warning {
 	#
 	my $mimedoc = build MIME::Entity
 		Type     => "multipart/mixed",
-		-From    => "Backup Process on $machine <$machine\@n2k.com>",
+		-From    => "Backup Process on $machine <$effective_user\@$machine>",
 		-To      => "$recipients",
 		-Subject => "$subject";
 
